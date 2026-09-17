@@ -1,4 +1,6 @@
 var utils = require('../../../lib/utils');
+var defaults = require('../../../lib/defaults');
+var settle = require('../../../lib/core/settle');
 
 // CVE-2026-42033 helpers.
 //
@@ -13,6 +15,22 @@ function pollute(key, value) {
   Object.defineProperty(Object.prototype, key, {
     value: value,
     writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  pollutedKeys.push(key);
+}
+
+// CVE-2026-42041 helper.
+//
+// The nastier shape of prototype pollution is an accessor pair rather than a
+// plain value: the setter swallows the write, so `target[key] = ...` never
+// creates an own property on the merge result and every later read keeps
+// resolving to the attacker's getter.
+function polluteAccessor(key, value) {
+  Object.defineProperty(Object.prototype, key, {
+    get: function() { return value; },
+    set: function() { /* swallow the write */ },
     configurable: true,
     enumerable: false
   });
@@ -49,6 +67,23 @@ function captureAdapter(onConfig, responseData) {
       headers: {},
       config: config,
       request: {}
+    });
+  };
+}
+
+function settlingAdapter(status, statusText) {
+  // A stand-in adapter that hands the response to `settle`, exactly like the
+  // real xhr and http adapters do, so `validateStatus` decides the outcome.
+  return function adapter(config) {
+    return new Promise(function(resolve, reject) {
+      settle(resolve, reject, {
+        data: '',
+        status: status,
+        statusText: statusText,
+        headers: {},
+        config: config,
+        request: {}
+      });
     });
   };
 }
@@ -457,6 +492,80 @@ describe('Prototype Pollution Protection', function() {
         done();
       }, function(err) {
         fail(err);
+        done();
+      });
+    });
+  });
+
+  // CVE-2026-42041: `validateStatus` is the option that decides whether a
+  // response counts as an error, so a prototype gadget that supplies it turns
+  // every 401, 403 and 5xx into a success -- authentication failures, WAF
+  // blocks and rate limits are all silently swallowed.
+  //
+  // A plain `Object.prototype.validateStatus = ...` is shadowed here because
+  // the default validator is copied out of `lib/defaults.js` on every merge.
+  // An accessor pair is not: its setter swallows the copy, `merge` leaves no
+  // own property behind and `config.validateStatus` resolves to the attacker's
+  // getter. Merging with `Object.defineProperty` always lands an own value, so
+  // the inherited accessor is never consulted.
+  describe('inherited validateStatus', function() {
+    it('should always leave an own validateStatus on the merged config', function() {
+      var hijacked = function() { return true; };
+      polluteAccessor('validateStatus', hijacked);
+
+      var config = utils.merge(defaults, { method: 'get', url: '/api/test' });
+
+      expect(Object.prototype.hasOwnProperty.call(config, 'validateStatus')).toEqual(true);
+      expect(config.validateStatus).not.toBe(hijacked);
+      expect(config.validateStatus(401)).toEqual(false);
+      expect(config.validateStatus(200)).toEqual(true);
+    });
+
+    it('should still reject an unauthorized status when validateStatus is polluted', function() {
+      var hijacked = function() { return true; };
+      polluteAccessor('validateStatus', hijacked);
+
+      var resolve = jasmine.createSpy('resolve');
+      var reject = jasmine.createSpy('reject');
+      var config = utils.merge(defaults, { method: 'get', url: '/api/test' });
+
+      settle(resolve, reject, { status: 401, config: config, request: {} });
+
+      expect(resolve).not.toHaveBeenCalled();
+      expect(reject).toHaveBeenCalled();
+    });
+
+    it('should not let an inherited validateStatus suppress an error response', function(done) {
+      var hijacked = function() { return true; };
+      polluteAccessor('validateStatus', hijacked);
+
+      axios.request({
+        url: '/api/test',
+        adapter: settlingAdapter(401, 'Unauthorized')
+      }).then(function() {
+        // Unpatched the hijacked validator reports the 401 as a success and the
+        // caller processes the response as if it were authorized.
+        fail('the 401 response should not have been reported as a success');
+        done();
+      }, function(error) {
+        expect(error.message).toEqual('Request failed with status code 401');
+        expect(error.response.status).toEqual(401);
+        done();
+      });
+    });
+
+    it('should keep honouring an explicit validateStatus while polluted', function(done) {
+      polluteAccessor('validateStatus', function() { return false; });
+
+      axios.request({
+        url: '/api/test',
+        validateStatus: function(status) { return status === 401; },
+        adapter: settlingAdapter(401, 'Unauthorized')
+      }).then(function(response) {
+        expect(response.status).toEqual(401);
+        done();
+      }, function(error) {
+        fail(error);
         done();
       });
     });
