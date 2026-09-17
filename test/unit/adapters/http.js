@@ -7,18 +7,55 @@ var server, proxy;
 
 module.exports = {
   tearDown: function (callback) {
-    server.close();
-    server = null;
+    if (server) {
+      server.close();
+      server = null;
+    }
     if (proxy) {
       proxy.close()
       proxy = null;
     }
 
-    if (process.env.http_proxy) {
-      delete process.env.http_proxy;
-    }
+    delete process.env.http_proxy;
+    delete process.env.HTTP_PROXY;
+    delete process.env.https_proxy;
+    delete process.env.no_proxy;
+    delete process.env.NO_PROXY;
 
     callback();
+  },
+
+  testSanitizeRequestHeadersContainingInvalidCharacters: function (test) {
+    server = http.createServer(function (req, res) {
+      res.setHeader('Content-Type', 'text/plain');
+      res.end(req.headers['x-test']);
+    }).listen(4444, function () {
+      axios.get('http://localhost:4444/', {
+        headers: {
+          'x-test': ' ok\r\nInjected: yes\t'
+        }
+      }).then(function (response) {
+        test.equal(response.data, 'okInjected: yes', 'header value should be sanitized');
+        test.done();
+      }).catch(function (error) {
+        test.ok(false, 'request should not fail: ' + error.message);
+        test.done();
+      });
+    });
+  },
+
+  testPreserveRequestErrorForUnavailableHostWithInvalidCharacters: function (test) {
+    axios.get('http://localhost:1/', {
+      headers: {
+        'x-test': 'ok\r\nInjected: yes'
+      }
+    }).then(function () {
+      test.ok(false, 'request should not succeed');
+      test.done();
+    }).catch(function (error) {
+      test.notEqual(error.message, 'Invalid character in header content ["x-test"]');
+      test.done();
+    });
   },
 
   testTimeout: function (test) {
@@ -466,6 +503,144 @@ module.exports = {
         }).then(function(res) {
           var base64 = new Buffer('user:pass', 'utf8').toString('base64');
           test.equal(res.data, 'Basic ' + base64, 'should authenticate to the proxy');
+          test.done();
+        });
+      });
+    });
+  },
+
+  testNoProxyForLocalhostWithTrailingDot: function (test) {
+    var proxyRequests = 0;
+
+    proxy = http.createServer(function (request, response) {
+      proxyRequests += 1;
+      response.end('proxied');
+    }).listen(4000, function () {
+      process.env.http_proxy = 'http://localhost:4000/';
+      process.env.HTTP_PROXY = 'http://localhost:4000/';
+      process.env.no_proxy = 'localhost,127.0.0.1,::1';
+      process.env.NO_PROXY = 'localhost,127.0.0.1,::1';
+
+      axios.get('http://localhost.:1/', {
+        timeout: 100
+      }).then(function () {
+        test.ok(false, 'request should not succeed');
+        test.equal(proxyRequests, 0, 'should not use proxy for localhost with trailing dot');
+        test.done();
+      }).catch(function () {
+        test.equal(proxyRequests, 0, 'should not use proxy for localhost with trailing dot');
+        test.done();
+      });
+    });
+  },
+
+  testNoProxyForBracketedIPv6Loopback: function (test) {
+    var proxyRequests = 0;
+
+    proxy = http.createServer(function (request, response) {
+      proxyRequests += 1;
+      response.end('proxied');
+    }).listen(4000, function () {
+      process.env.http_proxy = 'http://localhost:4000/';
+      process.env.HTTP_PROXY = 'http://localhost:4000/';
+      process.env.no_proxy = 'localhost,127.0.0.1,::1';
+      process.env.NO_PROXY = 'localhost,127.0.0.1,::1';
+
+      axios.get('http://[::1]:1/', {
+        timeout: 100
+      }).then(function () {
+        test.ok(false, 'request should not succeed');
+        test.equal(proxyRequests, 0, 'should not use proxy for IPv6 loopback');
+        test.done();
+      }).catch(function () {
+        test.equal(proxyRequests, 0, 'should not use proxy for IPv6 loopback');
+        test.done();
+      });
+    });
+  },
+
+  testNoProxyForIPv4LoopbackAlias: function (test) {
+    var proxyRequests = 0;
+
+    proxy = http.createServer(function (request, response) {
+      proxyRequests += 1;
+      response.end('proxied');
+    }).listen(4000, function () {
+      process.env.http_proxy = 'http://localhost:4000/';
+      process.env.HTTP_PROXY = 'http://localhost:4000/';
+      process.env.no_proxy = 'localhost';
+      process.env.NO_PROXY = 'localhost';
+
+      axios.get('http://127.0.0.1:1/', {
+        timeout: 100
+      }).then(function () {
+        test.ok(false, 'request should not succeed');
+        test.equal(proxyRequests, 0, 'should not use proxy for IPv4 loopback alias');
+        test.done();
+      }).catch(function () {
+        test.equal(proxyRequests, 0, 'should not use proxy for IPv4 loopback alias');
+        test.done();
+      });
+    });
+  },
+
+  testNoProxyForIPv6LoopbackAlias: function (test) {
+    var proxyRequests = 0;
+
+    proxy = http.createServer(function (request, response) {
+      proxyRequests += 1;
+      response.end('proxied');
+    }).listen(4000, function () {
+      process.env.http_proxy = 'http://localhost:4000/';
+      process.env.HTTP_PROXY = 'http://localhost:4000/';
+      process.env.no_proxy = 'localhost';
+      process.env.NO_PROXY = 'localhost';
+
+      axios.get('http://[::1]:1/', {
+        timeout: 100
+      }).then(function () {
+        test.ok(false, 'request should not succeed');
+        test.equal(proxyRequests, 0, 'should not use proxy for IPv6 loopback alias');
+        test.done();
+      }).catch(function () {
+        test.equal(proxyRequests, 0, 'should not use proxy for IPv6 loopback alias');
+        test.done();
+      });
+    });
+  },
+
+  testProxyForDomainsNotInNoProxy: function (test) {
+    server = http.createServer(function (req, res) {
+      res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+      res.end('4567');
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        var parsed = url.parse(request.url);
+        var opts = {
+          host: parsed.hostname,
+          port: parsed.port,
+          path: parsed.path
+        };
+
+        http.get(opts, function (res) {
+          var body = '';
+          res.on('data', function (data) {
+            body += data;
+          });
+          res.on('end', function () {
+            response.setHeader('Content-Type', 'text/html; charset=UTF-8');
+            response.end(body + '1234');
+          });
+        });
+      }).listen(4000, function () {
+        process.env.http_proxy = 'http://localhost:4000/';
+        process.env.no_proxy = 'example.com,example.org';
+
+        axios.get('http://localhost:4444/').then(function (res) {
+          test.equal(res.data, '45671234', 'should use proxy for domains not in no_proxy');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
           test.done();
         });
       });
