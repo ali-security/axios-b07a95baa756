@@ -79,6 +79,22 @@ setupBasicAuthTest = function setupBasicAuthTest() {
     }, 100);
   });
 
+  it('should normalize nullish own HTTP Basic auth credentials to empty strings', function (done) {
+    axios('/foo', {
+      auth: {
+        username: undefined,
+        password: null
+      }
+    });
+
+    setTimeout(function () {
+      var request = jasmine.Ajax.requests.mostRecent();
+
+      expect(request.requestHeaders['Authorization']).toEqual('Basic Og==');
+      done();
+    }, 100);
+  });
+
   it('should fail to encode HTTP Basic auth credentials with non-Latin1 characters', function (done) {
     axios('/foo', {
       auth: {

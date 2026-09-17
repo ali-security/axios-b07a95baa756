@@ -272,6 +272,73 @@ module.exports = {
     });
   },
 
+  testShouldNormalizeNullishBasicAuthCredentials: function (test) {
+    server = http.createServer(function (req, res) {
+      res.end(req.headers.authorization);
+    }).listen(4444, function () {
+      var auth = { username: undefined, password: null };
+      axios.get('http://localhost:4444/', { auth: auth }).then(function (res) {
+        var base64 = new Buffer(':', 'utf8').toString('base64');
+        test.equal(res.data, 'Basic ' + base64, 'nullish own credentials should become empty strings');
+        test.done();
+      }).catch(function (error) {
+        test.ok(false, 'request should not fail: ' + error.message);
+        test.done();
+      });
+    });
+  },
+
+  testShouldNotUseInheritedBasicAuthCredentials: function (test) {
+    // An `auth` object carrying neither an own `username` nor an own
+    // `password` -- what an interceptor that rebuilds the config hands over --
+    // used to resolve both fields through `Object.prototype`, so a polluted
+    // prototype decided which credentials were sent to the server.
+    server = http.createServer(function (req, res) {
+      res.end(req.headers.authorization || '');
+    }).listen(4444, function () {
+      pollutePrototype({
+        username: 'attacker',
+        password: 'secret'
+      });
+
+      var polluted = 'Basic ' + new Buffer('attacker:secret', 'utf8').toString('base64');
+      var empty = 'Basic ' + new Buffer(':', 'utf8').toString('base64');
+
+      axios.get('http://localhost:4444/', { auth: {} }).then(function (res) {
+        test.notEqual(res.data, polluted, 'should not send inherited basic auth credentials');
+        test.equal(res.data, empty, 'missing own credentials should be sent as empty strings');
+        test.done();
+      }).catch(function (error) {
+        test.ok(false, 'request should not fail: ' + error.message);
+        test.done();
+      });
+    });
+  },
+
+  testShouldNotUseInheritedBasicAuthPassword: function (test) {
+    // Only the password is missing here: the caller's own user name has to
+    // survive while the inherited password must not be picked up.
+    server = http.createServer(function (req, res) {
+      res.end(req.headers.authorization || '');
+    }).listen(4444, function () {
+      pollutePrototype({
+        password: 'secret'
+      });
+
+      var polluted = 'Basic ' + new Buffer('foo:secret', 'utf8').toString('base64');
+      var expected = 'Basic ' + new Buffer('foo:', 'utf8').toString('base64');
+
+      axios.get('http://localhost:4444/', { auth: { username: 'foo' } }).then(function (res) {
+        test.notEqual(res.data, polluted, 'should not send an inherited basic auth password');
+        test.equal(res.data, expected, 'the own user name should still be sent');
+        test.done();
+      }).catch(function (error) {
+        test.ok(false, 'request should not fail: ' + error.message);
+        test.done();
+      });
+    });
+  },
+
   testMaxContentLength: function(test) {
     var str = Array(100000).join('ж');
 
@@ -1057,6 +1124,61 @@ module.exports = {
         test.done();
       }).catch(function () {
         test.equal(proxyRequests, 0, 'should not use proxy for IPv6 loopback alias');
+        test.done();
+      });
+    });
+  },
+
+  testNoProxyForUnspecifiedIPv4Address: function (test) {
+    // `0.0.0.0` is only a listening wildcard: an outbound request aimed at it
+    // reaches the local host, exactly like `localhost` would. It used to fall
+    // outside the loopback alias set, so the usual `no_proxy` listing did not
+    // cover it and the request -- along with anything it carried -- went
+    // through the proxy after all.
+    var proxyRequests = 0;
+
+    proxy = http.createServer(function (request, response) {
+      proxyRequests += 1;
+      response.end('proxied');
+    }).listen(4000, function () {
+      process.env.http_proxy = 'http://localhost:4000/';
+      process.env.HTTP_PROXY = 'http://localhost:4000/';
+      process.env.no_proxy = 'localhost,127.0.0.1,::1';
+      process.env.NO_PROXY = 'localhost,127.0.0.1,::1';
+
+      axios.get('http://0.0.0.0:1/', {
+        timeout: 100
+      }).then(function () {
+        test.ok(false, 'request should not succeed');
+        test.equal(proxyRequests, 0, 'should not use proxy for the unspecified IPv4 address');
+        test.done();
+      }).catch(function () {
+        test.equal(proxyRequests, 0, 'should not use proxy for the unspecified IPv4 address');
+        test.done();
+      });
+    });
+  },
+
+  testNoProxyForUnspecifiedIPv6Address: function (test) {
+    var proxyRequests = 0;
+
+    proxy = http.createServer(function (request, response) {
+      proxyRequests += 1;
+      response.end('proxied');
+    }).listen(4000, function () {
+      process.env.http_proxy = 'http://localhost:4000/';
+      process.env.HTTP_PROXY = 'http://localhost:4000/';
+      process.env.no_proxy = 'localhost,127.0.0.1,::1';
+      process.env.NO_PROXY = 'localhost,127.0.0.1,::1';
+
+      axios.get('http://[::]:1/', {
+        timeout: 100
+      }).then(function () {
+        test.ok(false, 'request should not succeed');
+        test.equal(proxyRequests, 0, 'should not use proxy for the unspecified IPv6 address');
+        test.done();
+      }).catch(function () {
+        test.equal(proxyRequests, 0, 'should not use proxy for the unspecified IPv6 address');
         test.done();
       });
     });

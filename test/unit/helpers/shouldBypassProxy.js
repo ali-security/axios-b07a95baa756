@@ -79,6 +79,36 @@ module.exports = {
     test.done();
   },
 
+  testTreatUnspecifiedIPv4AddressAsLocalForNoProxyMatching: function (test) {
+    setNoProxy('localhost,127.0.0.1,::1');
+
+    test.strictEqual(shouldBypassProxy('http://0.0.0.0:8080/'), true);
+    test.done();
+  },
+
+  testKeepUnspecifiedIPv4AddressNoProxyMatchingPortAware: function (test) {
+    setNoProxy('localhost:8080');
+
+    test.strictEqual(shouldBypassProxy('http://0.0.0.0:8080/'), true);
+    test.strictEqual(shouldBypassProxy('http://0.0.0.0:8081/'), false);
+    test.done();
+  },
+
+  testTreatUnspecifiedIPv6AddressAsLocalForNoProxyMatching: function (test) {
+    setNoProxy('localhost,127.0.0.1,::1');
+
+    test.strictEqual(shouldBypassProxy('http://[::]:8080/'), true);
+    test.done();
+  },
+
+  testSupportUnspecifiedAddressEntriesInNoProxy: function (test) {
+    setNoProxy('0.0.0.0');
+
+    test.strictEqual(shouldBypassProxy('http://localhost:8080/'), true);
+    test.strictEqual(shouldBypassProxy('http://example.com/'), false);
+    test.done();
+  },
+
   testBypassProxyForIPv4MappedIPv6LoopbackWhenIPv4IsListed: function (test) {
     setNoProxy('127.0.0.1');
 

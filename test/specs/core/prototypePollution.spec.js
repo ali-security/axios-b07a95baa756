@@ -616,6 +616,35 @@ describe('Prototype Pollution Protection', function() {
       });
     });
 
+    it('should not inherit auth credentials from Object.prototype', function(done) {
+      // `auth` itself is an own property here, so the guard around it does not
+      // help: without an own `username`/`password` both fields resolved
+      // through `Object.prototype` and the attacker picked the credentials
+      // that went out on the wire.
+      pollute('username', 'attacker');
+      pollute('password', 'secret');
+
+      axios('/foo', { auth: {} });
+
+      getAjaxRequest().then(function(request) {
+        expect(request.requestHeaders.Authorization).not.toEqual('Basic YXR0YWNrZXI6c2VjcmV0');
+        expect(request.requestHeaders.Authorization).toEqual('Basic Og==');
+        done();
+      });
+    });
+
+    it('should not inherit an auth password from Object.prototype', function(done) {
+      pollute('password', 'secret');
+
+      axios('/foo', { auth: { username: 'foo' } });
+
+      getAjaxRequest().then(function(request) {
+        expect(request.requestHeaders.Authorization).not.toEqual('Basic Zm9vOnNlY3JldA==');
+        expect(request.requestHeaders.Authorization).toEqual('Basic Zm9vOg==');
+        done();
+      });
+    });
+
     it('should not inherit paramsSerializer from Object.prototype', function(done) {
       pollute('paramsSerializer', function hijackSerializer() {
         return 'injected=1';
