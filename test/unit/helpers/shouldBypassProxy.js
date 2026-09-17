@@ -79,6 +79,46 @@ module.exports = {
     test.done();
   },
 
+  testBypassProxyForIPv4MappedIPv6LoopbackWhenIPv4IsListed: function (test) {
+    setNoProxy('127.0.0.1');
+
+    test.strictEqual(shouldBypassProxy('http://[::ffff:127.0.0.1]/'), true);
+    test.strictEqual(shouldBypassProxy('http://[::ffff:7f00:1]/'), true);
+    test.done();
+  },
+
+  testBypassProxyForIPv4MappedIPv6MetadataAddressWhenIPv4IsListed: function (test) {
+    setNoProxy('169.254.169.254');
+
+    test.strictEqual(shouldBypassProxy('http://[::ffff:a9fe:a9fe]/latest/meta-data/'), true);
+    test.done();
+  },
+
+  testSupportIPv4MappedIPv6EntriesInNoProxy: function (test) {
+    setNoProxy('[::ffff:7f00:1]');
+
+    test.strictEqual(shouldBypassProxy('http://127.0.0.1:8080/'), true);
+    test.strictEqual(shouldBypassProxy('http://[::ffff:127.0.0.1]:8080/'), true);
+    test.done();
+  },
+
+  testKeepIPv4MappedIPv6NoProxyEntriesPortAware: function (test) {
+    setNoProxy('[::ffff:7f00:1]:8080');
+
+    test.strictEqual(shouldBypassProxy('http://127.0.0.1:8080/'), true);
+    test.strictEqual(shouldBypassProxy('http://[::ffff:7f00:1]:8080/'), true);
+    test.strictEqual(shouldBypassProxy('http://[::ffff:7f00:1]:8081/'), false);
+    test.done();
+  },
+
+  testNormaliseIPv4MappedIPv6NoProxyEntriesRegardlessOfHexCase: function (test) {
+    setNoProxy('[::FFFF:7F00:1]');
+
+    test.strictEqual(shouldBypassProxy('http://127.0.0.1:8080/'), true);
+    test.strictEqual(shouldBypassProxy('http://[::ffff:7f00:1]:8080/'), true);
+    test.done();
+  },
+
   testMatchWholeHostAndNotSuffix: function (test) {
     setNoProxy('example.com');
 
