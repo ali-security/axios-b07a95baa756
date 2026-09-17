@@ -543,6 +543,231 @@ module.exports = {
     });
   },
 
+  // `Proxy-Authorization` only ever belongs to the proxy hop. When no proxy
+  // applies -- here because `no_proxy` excludes the target -- a header the
+  // caller (or a poisoned config) left on the request must not travel to the
+  // origin server, whatever casing it was written with.
+  testShouldRemoveProxyAuthorizationWhenProxyIsBypassed: function (test) {
+    var proxyRequests = 0;
+
+    server = http.createServer(function (req, res) {
+      res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+      res.end(req.headers['proxy-authorization'] || '');
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        proxyRequests += 1;
+        response.end('proxied');
+      }).listen(4000, function () {
+        process.env.http_proxy = 'http://user:pass@localhost:4000/';
+        process.env.HTTP_PROXY = 'http://user:pass@localhost:4000/';
+        process.env.no_proxy = 'localhost';
+        process.env.NO_PROXY = 'localhost';
+
+        axios.get('http://localhost:4444/', {
+          headers: {
+            'pRoXy-AuThOrIzAtIoN': 'Basic c3RhbGU6Y3JlZHM='
+          }
+        }).then(function (res) {
+          test.equal(proxyRequests, 0, 'should not route the bypassed request through the proxy');
+          test.equal(res.data, '', 'should not leak Proxy-Authorization to a directly contacted origin');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
+  testShouldRemoveProxyAuthorizationWhenNoProxyIsConfigured: function (test) {
+    server = http.createServer(function (req, res) {
+      res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+      res.end(req.headers['proxy-authorization'] || '');
+    }).listen(4444, function () {
+      axios.get('http://localhost:4444/', {
+        headers: {
+          'Proxy-Authorization': 'Basic c3RhbGU6Y3JlZHM='
+        }
+      }).then(function (res) {
+        test.equal(res.data, '', 'should not leak Proxy-Authorization when no proxy is configured');
+        test.done();
+      }).catch(function (error) {
+        test.ok(false, 'request should not fail: ' + error.message);
+        test.done();
+      });
+    });
+  },
+
+  // A stale case variant must not survive next to the credentials computed
+  // from the proxy descriptor -- the proxy must only ever see the configured
+  // credentials, whichever casing the caller used for its own header.
+  testShouldNotSendStaleProxyAuthorizationAlongsideProxyCredentials: function (test) {
+    server = http.createServer(function (req, res) {
+      res.end();
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        var parsed = url.parse(request.url);
+        var opts = {
+          host: parsed.hostname,
+          port: parsed.port,
+          path: parsed.path
+        };
+        var proxyAuth = request.headers['proxy-authorization'];
+
+        http.get(opts, function (res) {
+          res.on('data', function () {});
+          res.on('end', function () {
+            response.setHeader('Content-Type', 'text/html; charset=UTF-8');
+            response.end(proxyAuth || '');
+          });
+        });
+
+      }).listen(4000, function () {
+        axios.get('http://localhost:4444/', {
+          proxy: {
+            host: 'localhost',
+            port: 4000,
+            auth: {
+              username: 'user',
+              password: 'pass'
+            }
+          },
+          headers: {
+            'pRoXy-AuThOrIzAtIoN': 'Basic c3RhbGU6Y3JlZHM='
+          }
+        }).then(function (res) {
+          var base64 = new Buffer('user:pass', 'utf8').toString('base64');
+          test.equal(res.data, 'Basic ' + base64,
+            'should authenticate to the proxy with the configured credentials only');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
+  // GHSA-j5f8-grm9-p9fc / GHSA-p92q-9vqr-4j8v: a proxied request that follows a
+  // redirect is re-dispatched straight at the redirect target, so the proxy
+  // credentials must not travel along with it. The `Location` is attacker
+  // controlled, which is what turns this into a credential disclosure.
+  testShouldRemoveProxyAuthorizationOnRedirectAwayFromTheProxy: function (test) {
+    var proxyRequestAuth = null;
+    var leakedProxyAuth = null;
+
+    // Stands in for the attacker controlled origin the redirect points at.
+    server = http.createServer(function (req, res) {
+      leakedProxyAuth = req.headers['proxy-authorization'];
+      res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+      res.end('final');
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        proxyRequestAuth = request.headers['proxy-authorization'];
+        response.setHeader('Location', 'http://localhost:4444/final');
+        response.statusCode = 302;
+        response.end();
+      }).listen(4000, function () {
+        axios.get('http://example.test/start', {
+          proxy: {
+            host: 'localhost',
+            port: 4000,
+            auth: {
+              username: 'user',
+              password: 'pass'
+            }
+          },
+          maxRedirects: 1
+        }).then(function (res) {
+          var base64 = new Buffer('user:pass', 'utf8').toString('base64');
+          test.equal(res.data, 'final', 'should follow the redirect');
+          test.equal(proxyRequestAuth, 'Basic ' + base64, 'should still authenticate to the proxy itself');
+          test.strictEqual(leakedProxyAuth, undefined,
+            'should not leak proxy credentials to the redirect target');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
+  testShouldRemoveProxyAuthorizationOnRedirectFromTheProxyEnvironmentVariable: function (test) {
+    var leakedProxyAuth = null;
+
+    server = http.createServer(function (req, res) {
+      leakedProxyAuth = req.headers['proxy-authorization'];
+      res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+      res.end('final');
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        response.setHeader('Location', 'http://localhost:4444/final');
+        response.statusCode = 302;
+        response.end();
+      }).listen(4000, function () {
+        process.env.http_proxy = 'http://user:pass@localhost:4000/';
+        process.env.HTTP_PROXY = 'http://user:pass@localhost:4000/';
+
+        axios.get('http://example.test/start', {
+          maxRedirects: 1
+        }).then(function (res) {
+          test.equal(res.data, 'final', 'should follow the redirect');
+          test.strictEqual(leakedProxyAuth, undefined,
+            'should not leak credentials taken from http_proxy to the redirect target');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
+  // Non regression: a `Proxy-Authorization` header is still the supported way
+  // to authenticate against an explicitly configured proxy that carries no
+  // `auth` descriptor of its own.
+  testShouldKeepProxyAuthorizationHeaderWhenProxyHasNoAuth: function (test) {
+    server = http.createServer(function (req, res) {
+      res.end();
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        var parsed = url.parse(request.url);
+        var opts = {
+          host: parsed.hostname,
+          port: parsed.port,
+          path: parsed.path
+        };
+        var proxyAuth = request.headers['proxy-authorization'];
+
+        http.get(opts, function (res) {
+          res.on('data', function () {});
+          res.on('end', function () {
+            response.setHeader('Content-Type', 'text/html; charset=UTF-8');
+            response.end(proxyAuth || '');
+          });
+        });
+
+      }).listen(4000, function () {
+        axios.get('http://localhost:4444/', {
+          proxy: {
+            host: 'localhost',
+            port: 4000
+          },
+          headers: {
+            'Proxy-Authorization': 'Basic abc123'
+          }
+        }).then(function (res) {
+          test.equal(res.data, 'Basic abc123', 'should send the configured proxy authorization header to the proxy');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
   testShouldNotUseInheritedProxyAuthCredentials: function (test) {
     server = http.createServer(function (req, res) {
       res.end();
