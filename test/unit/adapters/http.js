@@ -648,13 +648,14 @@ module.exports = {
     });
   },
 
-  // GHSA-j5f8-grm9-p9fc / GHSA-p92q-9vqr-4j8v: a proxied request that follows a
-  // redirect is re-dispatched straight at the redirect target, so the proxy
-  // credentials must not travel along with it. The `Location` is attacker
-  // controlled, which is what turns this into a credential disclosure.
+  // GHSA-j5f8-grm9-p9fc / GHSA-p92q-9vqr-4j8v: the `Location` a redirect points
+  // at is attacker controlled, so the credentials computed for the proxy must
+  // never reach it. Every hop is routed back through the proxy
+  // (CVE-2020-28168), so the redirect target is only ever reached through the
+  // proxy and never receives a `Proxy-Authorization` of its own.
   testShouldRemoveProxyAuthorizationOnRedirectAwayFromTheProxy: function (test) {
-    var proxyRequestAuth = null;
-    var leakedProxyAuth = null;
+    var proxyRequestAuth = [];
+    var leakedProxyAuth = 'the redirect target was never contacted';
 
     // Stands in for the attacker controlled origin the redirect points at.
     server = http.createServer(function (req, res) {
@@ -663,10 +664,32 @@ module.exports = {
       res.end('final');
     }).listen(4444, function () {
       proxy = http.createServer(function (request, response) {
-        proxyRequestAuth = request.headers['proxy-authorization'];
-        response.setHeader('Location', 'http://localhost:4444/final');
-        response.statusCode = 302;
-        response.end();
+        proxyRequestAuth.push(request.headers['proxy-authorization']);
+
+        if (proxyRequestAuth.length === 1) {
+          response.setHeader('Location', 'http://localhost:4444/final');
+          response.statusCode = 302;
+          response.end();
+          return;
+        }
+
+        var parsed = url.parse(request.url);
+        var opts = {
+          host: parsed.hostname,
+          port: parsed.port,
+          path: parsed.path
+        };
+
+        http.get(opts, function (res) {
+          var body = '';
+          res.on('data', function (data) {
+            body += data;
+          });
+          res.on('end', function () {
+            response.setHeader('Content-Type', 'text/html; charset=UTF-8');
+            response.end(body);
+          });
+        });
       }).listen(4000, function () {
         axios.get('http://example.test/start', {
           proxy: {
@@ -681,7 +704,8 @@ module.exports = {
         }).then(function (res) {
           var base64 = new Buffer('user:pass', 'utf8').toString('base64');
           test.equal(res.data, 'final', 'should follow the redirect');
-          test.equal(proxyRequestAuth, 'Basic ' + base64, 'should still authenticate to the proxy itself');
+          test.deepEqual(proxyRequestAuth, ['Basic ' + base64, 'Basic ' + base64],
+            'should authenticate to the proxy itself on every hop');
           test.strictEqual(leakedProxyAuth, undefined,
             'should not leak proxy credentials to the redirect target');
           test.done();
@@ -693,8 +717,12 @@ module.exports = {
     });
   },
 
+  // `no_proxy` is re-evaluated for the redirect target, so this hop really is
+  // sent to the origin directly -- which is exactly when the credentials taken
+  // from `http_proxy` have to be dropped from the header bag.
   testShouldRemoveProxyAuthorizationOnRedirectFromTheProxyEnvironmentVariable: function (test) {
-    var leakedProxyAuth = null;
+    var leakedProxyAuth = 'the redirect target was never contacted';
+    var proxyRequests = 0;
 
     server = http.createServer(function (req, res) {
       leakedProxyAuth = req.headers['proxy-authorization'];
@@ -702,17 +730,21 @@ module.exports = {
       res.end('final');
     }).listen(4444, function () {
       proxy = http.createServer(function (request, response) {
+        proxyRequests += 1;
         response.setHeader('Location', 'http://localhost:4444/final');
         response.statusCode = 302;
         response.end();
       }).listen(4000, function () {
         process.env.http_proxy = 'http://user:pass@localhost:4000/';
         process.env.HTTP_PROXY = 'http://user:pass@localhost:4000/';
+        process.env.no_proxy = 'localhost';
+        process.env.NO_PROXY = 'localhost';
 
         axios.get('http://example.test/start', {
           maxRedirects: 1
         }).then(function (res) {
           test.equal(res.data, 'final', 'should follow the redirect');
+          test.equal(proxyRequests, 1, 'should only use the proxy for the hop it covers');
           test.strictEqual(leakedProxyAuth, undefined,
             'should not leak credentials taken from http_proxy to the redirect target');
           test.done();
