@@ -1,0 +1,21 @@
+name: seal-build
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '6.10.1'
+      - name: Pack the npm tarball
+        run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axios-tgz
+          path: axios-0.16.2.tgz
+          if-no-files-found: error

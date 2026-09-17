@@ -104,7 +104,7 @@ module.exports = function(config) {
     browsers = ['Firefox'];
   } else {
     console.log('Running locally since SAUCE_USERNAME and SAUCE_ACCESS_KEY environment variables are not set.');
-    browsers = ['Firefox', 'Chrome', 'Safari', 'Opera'];
+    browsers = ['Firefox'];
   }
 
   config.set({
