@@ -154,4 +154,112 @@ describe('xsrf', function () {
       });
     });
   });
+
+  // CVE-2026-42042 / GHSA-xx6v-rp6x-q39c.
+  //
+  // `withXSRFToken` used to be evaluated for truthiness, so any truthy value --
+  // `1`, `'yes'`, `{}`, or whatever a resolver function happened to return --
+  // short-circuited the same origin guard and shipped the victim's xsrf token
+  // to a foreign origin. Only an explicit `true` may do that; every other
+  // truthy value has to fall back to the same origin check.
+  describe('withXSRFToken strict boolean check', function () {
+    var token = '12345';
+
+    function expectNoTokenCrossOrigin(config, done) {
+      document.cookie = axios.defaults.xsrfCookieName + '=' + token;
+
+      axios('http://example.com/', config);
+
+      getAjaxRequest().then(function (request) {
+        // Unpatched the truthy value bypasses `isURLSameOrigin` and the token
+        // is handed to the attacker's host.
+        expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(undefined);
+        done();
+      });
+    }
+
+    it('should not set xsrf header for cross origin when withXSRFToken is a truthy string', function (done) {
+      expectNoTokenCrossOrigin({ withXSRFToken: 'yes' }, done);
+    });
+
+    it('should not set xsrf header for cross origin when withXSRFToken is a truthy number', function (done) {
+      expectNoTokenCrossOrigin({ withXSRFToken: 1 }, done);
+    });
+
+    it('should not set xsrf header for cross origin when withXSRFToken is an object', function (done) {
+      expectNoTokenCrossOrigin({ withXSRFToken: {} }, done);
+    });
+
+    it('should not set xsrf header for cross origin when withXSRFToken comes from attacker JSON', function (done) {
+      // The realistic delivery: a config object parsed from attacker
+      // controlled JSON. `withXSRFToken` lands as an *own* property, so the
+      // own property guard alone does not stop it.
+      expectNoTokenCrossOrigin(JSON.parse('{"withXSRFToken": 1}'), done);
+    });
+
+    it('should not set xsrf header for cross origin when the resolver returns a truthy non boolean', function (done) {
+      expectNoTokenCrossOrigin({
+        withXSRFToken: function () { return 'yes'; }
+      }, done);
+    });
+
+    it('should still set xsrf header for cross origin when withXSRFToken is exactly true', function (done) {
+      document.cookie = axios.defaults.xsrfCookieName + '=' + token;
+
+      axios('http://example.com/', { withXSRFToken: true });
+
+      getAjaxRequest().then(function (request) {
+        expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(token);
+        done();
+      });
+    });
+
+    it('should still set xsrf header for cross origin when the resolver returns true', function (done) {
+      document.cookie = axios.defaults.xsrfCookieName + '=' + token;
+
+      axios('http://example.com/', {
+        withXSRFToken: function () { return true; }
+      });
+
+      getAjaxRequest().then(function (request) {
+        expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(token);
+        done();
+      });
+    });
+
+    it('should still set xsrf header for the same origin when withXSRFToken is a truthy non boolean', function (done) {
+      // Same origin behaviour is unchanged: the token was always allowed here,
+      // and a truthy non boolean must not turn into an opt *out*.
+      document.cookie = axios.defaults.xsrfCookieName + '=' + token;
+
+      axios('/foo', { withXSRFToken: 'yes' });
+
+      getAjaxRequest().then(function (request) {
+        expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(token);
+        done();
+      });
+    });
+
+    it('should still set xsrf header for the same origin when withXSRFToken is omitted', function (done) {
+      document.cookie = axios.defaults.xsrfCookieName + '=' + token;
+
+      axios('/foo');
+
+      getAjaxRequest().then(function (request) {
+        expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(token);
+        done();
+      });
+    });
+
+    it('should still honour an explicit false on the same origin', function (done) {
+      document.cookie = axios.defaults.xsrfCookieName + '=' + token;
+
+      axios('/foo', { withXSRFToken: false });
+
+      getAjaxRequest().then(function (request) {
+        expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(undefined);
+        done();
+      });
+    });
+  });
 });
