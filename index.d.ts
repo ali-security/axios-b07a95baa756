@@ -28,6 +28,7 @@ export interface AxiosRequestConfig {
   data?: any;
   timeout?: number;
   withCredentials?: boolean;
+  withXSRFToken?: boolean | ((config: AxiosRequestConfig) => boolean | undefined);
   adapter?: AxiosAdapter;
   auth?: AxiosBasicCredentials;
   responseType?: string;
