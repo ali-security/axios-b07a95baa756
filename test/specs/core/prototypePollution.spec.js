@@ -1,5 +1,30 @@
 var utils = require('../../../lib/utils');
 
+// CVE-2026-42033 helpers.
+//
+// The property only has to be reachable through the prototype chain for the
+// exploit to work, so it is installed as non-enumerable: `for...in` loops in
+// jasmine, webpack and the browser shims stay undisturbed while a request is in
+// flight, and the vulnerable `config.<option>` reads resolve exactly as they
+// would for real pollution.
+var pollutedKeys = [];
+
+function pollute(key, value) {
+  Object.defineProperty(Object.prototype, key, {
+    value: value,
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  pollutedKeys.push(key);
+}
+
+function cleanPollution() {
+  while (pollutedKeys.length) {
+    delete Object.prototype[pollutedKeys.pop()];
+  }
+}
+
 // CVE-2026-25639 regression suite.
 //
 // A configuration object built from attacker controlled JSON carries
@@ -12,13 +37,13 @@ var utils = require('../../../lib/utils');
 // them. The fix filters `__proto__`, `constructor` and `prototype` before any
 // assignment happens.
 
-function captureAdapter(onConfig) {
+function captureAdapter(onConfig, responseData) {
   // A stand-in adapter: it records the fully merged config and resolves
   // without touching the network.
   return function adapter(config) {
     onConfig(config);
     return Promise.resolve({
-      data: '',
+      data: typeof responseData === 'undefined' ? '' : responseData,
       status: 200,
       statusText: 'OK',
       headers: {},
@@ -32,6 +57,7 @@ describe('Prototype Pollution Protection', function() {
   afterEach(function() {
     // Clean up any pollution that might have occurred
     delete Object.prototype.polluted;
+    cleanPollution();
   });
 
   describe('utils.merge', function() {
@@ -323,6 +349,184 @@ describe('Prototype Pollution Protection', function() {
         done();
       }, function(err) {
         fail(err);
+        done();
+      });
+    });
+  });
+
+  // CVE-2026-42033: options must never be picked up from `Object.prototype`.
+  //
+  // `utils.merge` builds the config in a fresh `{}` and every consumer then
+  // reads its options back with a bare `config.<option>`; both resolve through
+  // the prototype chain. A polluted prototype could therefore become the merge
+  // target (injecting headers or an extra transform) or supply options the
+  // caller never set.
+  describe('inherited config options', function() {
+    it('should not use an inherited object as the merge target', function() {
+      pollute('headers', { 'X-Injected': 'yes' });
+
+      var result = utils.merge({}, { headers: { 'Content-Type': 'application/json' } });
+
+      expect(result.headers['Content-Type']).toEqual('application/json');
+      expect(result.headers['X-Injected']).toEqual(undefined);
+      expect(result.headers.hasOwnProperty('X-Injected')).toEqual(false);
+    });
+
+    it('should not inherit headers from Object.prototype', function(done) {
+      var captured = null;
+      pollute('headers', { 'X-Injected': 'yes' });
+
+      axios.request({
+        url: '/api/test',
+        adapter: captureAdapter(function(config) {
+          captured = config;
+        })
+      }).then(function() {
+        expect(captured.headers['X-Injected']).toEqual(undefined);
+        expect(captured.headers.Accept).toEqual('application/json, text/plain, */*');
+        done();
+      }, function(err) {
+        fail(err);
+        done();
+      });
+    });
+
+    it('should not inherit baseURL from Object.prototype', function(done) {
+      var captured = null;
+      pollute('baseURL', 'http://attacker.test');
+
+      axios.request({
+        url: '/api/test',
+        adapter: captureAdapter(function(config) {
+          captured = config;
+        })
+      }).then(function() {
+        // Unpatched `buildFullPath` reads the inherited baseURL and the request
+        // leaves for the attacker's host.
+        expect(captured.url).toEqual('/api/test');
+        done();
+      }, function(err) {
+        fail(err);
+        done();
+      });
+    });
+
+    it('should not inherit transformRequest from Object.prototype', function(done) {
+      var captured = null;
+      var tampered = false;
+
+      pollute('transformRequest', [
+        function passthrough(data) { return data; },
+        function hijack() {
+          tampered = true;
+          return 'hijacked';
+        }
+      ]);
+
+      axios.post('/api/test', { a: 1 }, {
+        adapter: captureAdapter(function(config) {
+          captured = config;
+        })
+      }).then(function() {
+        expect(tampered).toEqual(false);
+        expect(captured.data).toEqual('{"a":1}');
+        done();
+      }, function(err) {
+        fail(err);
+        done();
+      });
+    });
+
+    it('should not inherit transformResponse from Object.prototype', function(done) {
+      var tampered = false;
+
+      pollute('transformResponse', [
+        function passthrough(data) { return data; },
+        function hijack() {
+          tampered = true;
+          return 'hijacked';
+        }
+      ]);
+
+      axios.request({
+        url: '/api/test',
+        adapter: captureAdapter(function() {}, '{"ok":true}')
+      }).then(function(response) {
+        expect(tampered).toEqual(false);
+        expect(response.data.ok).toEqual(true);
+        done();
+      }, function(err) {
+        fail(err);
+        done();
+      });
+    });
+  });
+
+  describe('inherited xhr options', function() {
+    beforeEach(function() {
+      jasmine.Ajax.install();
+    });
+
+    afterEach(function() {
+      document.cookie = axios.defaults.xsrfCookieName + '=;expires=' + new Date(Date.now() - 86400000).toGMTString();
+      jasmine.Ajax.uninstall();
+    });
+
+    it('should not inherit withCredentials from Object.prototype', function(done) {
+      pollute('withCredentials', true);
+
+      axios('/foo');
+
+      getAjaxRequest().then(function(request) {
+        // Unpatched every request is sent with the user's cookies attached.
+        expect(request.withCredentials).not.toEqual(true);
+        done();
+      });
+    });
+
+    it('should not leak the xsrf token cross origin via an inherited withXSRFToken', function(done) {
+      document.cookie = axios.defaults.xsrfCookieName + '=12345';
+      pollute('withXSRFToken', true);
+
+      axios('http://example.com/');
+
+      getAjaxRequest().then(function(request) {
+        expect(request.requestHeaders[axios.defaults.xsrfHeaderName]).toEqual(undefined);
+        done();
+      });
+    });
+
+    it('should not inherit auth from Object.prototype', function(done) {
+      pollute('auth', { username: 'attacker', password: 'secret' });
+
+      axios('/foo');
+
+      getAjaxRequest().then(function(request) {
+        expect(request.requestHeaders.Authorization).toEqual(undefined);
+        done();
+      });
+    });
+
+    it('should not inherit paramsSerializer from Object.prototype', function(done) {
+      pollute('paramsSerializer', function hijackSerializer() {
+        return 'injected=1';
+      });
+
+      axios('/foo', { params: { a: 'b' } });
+
+      getAjaxRequest().then(function(request) {
+        expect(request.url).toEqual('/foo?a=b');
+        done();
+      });
+    });
+
+    it('should not inherit params from Object.prototype', function(done) {
+      pollute('params', { injected: '1' });
+
+      axios('/foo');
+
+      getAjaxRequest().then(function(request) {
+        expect(request.url).toEqual('/foo');
         done();
       });
     });
