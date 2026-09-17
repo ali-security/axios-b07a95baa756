@@ -5,7 +5,39 @@ var zlib = require('zlib');
 var fs = require('fs');
 var server, proxy;
 
+// Helpers for the prototype pollution regression tests below.
+//
+// The polluted properties are installed as *non enumerable* data properties on
+// purpose: an enumerable property on `Object.prototype` leaks into every
+// `for...in` loop node's http stack (and the other suites) runs, which breaks
+// unrelated tests instead of exercising the vulnerability under test.
+function pollutePrototype(props) {
+  Object.keys(props).forEach(function (key) {
+    Object.defineProperty(Object.prototype, key, {
+      value: props[key],
+      writable: true,
+      enumerable: false,
+      configurable: true
+    });
+  });
+}
+
+function clearPrototypePollution() {
+  delete Object.prototype.auth;
+  delete Object.prototype.username;
+  delete Object.prototype.password;
+  delete Object.prototype.host;
+  delete Object.prototype.port;
+}
+
 module.exports = {
+  setUp: function (callback) {
+    // Defensive: make sure no pollution leaked in from another test.
+    clearPrototypePollution();
+
+    callback();
+  },
+
   tearDown: function (callback) {
     if (server) {
       server.close();
@@ -21,6 +53,8 @@ module.exports = {
     delete process.env.https_proxy;
     delete process.env.no_proxy;
     delete process.env.NO_PROXY;
+
+    clearPrototypePollution();
 
     callback();
   },
@@ -505,6 +539,168 @@ module.exports = {
           test.equal(res.data, 'Basic ' + base64, 'should authenticate to the proxy');
           test.done();
         });
+      });
+    });
+  },
+
+  testShouldNotUseInheritedProxyAuthCredentials: function (test) {
+    server = http.createServer(function (req, res) {
+      res.end();
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        var parsed = url.parse(request.url);
+        var opts = {
+          host: parsed.hostname,
+          port: parsed.port,
+          path: parsed.path,
+          // Shadow the polluted `Object.prototype.auth` so node's own http
+          // client does not try to build a Basic header out of it.
+          auth: undefined
+        };
+        var proxyAuth = request.headers['proxy-authorization'];
+
+        http.get(opts, function (res) {
+          res.on('data', function () {});
+          res.on('end', function () {
+            response.setHeader('Content-Type', 'text/html; charset=UTF-8');
+            response.end(proxyAuth || '');
+          });
+        });
+
+      }).listen(4000, function () {
+        pollutePrototype({
+          auth: {},
+          username: 'polluted-user',
+          password: 'polluted-pass'
+        });
+
+        axios.get('http://localhost:4444/', {
+          proxy: {
+            host: 'localhost',
+            port: 4000
+          }
+        }).then(function (res) {
+          test.equal(res.data, '', 'should not send proxy credentials inherited from Object.prototype');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
+  testShouldNotUseInheritedProxyAuthCredentialsFromEnv: function (test) {
+    server = http.createServer(function (req, res) {
+      res.end();
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        var parsed = url.parse(request.url);
+        var opts = {
+          host: parsed.hostname,
+          port: parsed.port,
+          path: parsed.path,
+          auth: undefined
+        };
+        var proxyAuth = request.headers['proxy-authorization'];
+
+        http.get(opts, function (res) {
+          res.on('data', function () {});
+          res.on('end', function () {
+            response.setHeader('Content-Type', 'text/html; charset=UTF-8');
+            response.end(proxyAuth || '');
+          });
+        });
+
+      }).listen(4000, function () {
+        process.env.http_proxy = 'http://localhost:4000/';
+
+        pollutePrototype({
+          auth: {},
+          username: 'polluted-user',
+          password: 'polluted-pass'
+        });
+
+        axios.get('http://localhost:4444/').then(function (res) {
+          test.equal(res.data, '', 'should not send proxy credentials inherited from Object.prototype');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
+  testShouldNotUseInheritedProxyAuthPassword: function (test) {
+    server = http.createServer(function (req, res) {
+      res.end();
+    }).listen(4444, function () {
+      proxy = http.createServer(function (request, response) {
+        var parsed = url.parse(request.url);
+        var opts = {
+          host: parsed.hostname,
+          port: parsed.port,
+          path: parsed.path,
+          auth: undefined
+        };
+        var proxyAuth = request.headers['proxy-authorization'];
+
+        http.get(opts, function (res) {
+          res.on('data', function () {});
+          res.on('end', function () {
+            response.setHeader('Content-Type', 'text/html; charset=UTF-8');
+            response.end(proxyAuth || '');
+          });
+        });
+
+      }).listen(4000, function () {
+        pollutePrototype({
+          username: 'polluted-user',
+          password: 'polluted-pass'
+        });
+
+        axios.get('http://localhost:4444/', {
+          proxy: {
+            host: 'localhost',
+            port: 4000,
+            auth: {
+              username: 'user'
+            }
+          }
+        }).then(function (res) {
+          var base64 = new Buffer('user:', 'utf8').toString('base64');
+          test.equal(res.data, 'Basic ' + base64, 'should not fall back to an inherited proxy password');
+          test.done();
+        }).catch(function (error) {
+          test.ok(false, 'request should not fail: ' + error.message);
+          test.done();
+        });
+      });
+    });
+  },
+
+  testShouldNotUseInheritedProxyHostAndPort: function (test) {
+    var proxyRequests = 0;
+
+    proxy = http.createServer(function (request, response) {
+      proxyRequests += 1;
+      response.end('proxied');
+    }).listen(4000, function () {
+      pollutePrototype({
+        host: 'localhost',
+        port: 4000
+      });
+
+      axios.get('http://localhost:1/', {
+        proxy: {},
+        timeout: 250
+      }).then(function () {
+        test.equal(proxyRequests, 0, 'should not route the request through an inherited proxy host');
+        test.done();
+      }).catch(function () {
+        test.equal(proxyRequests, 0, 'should not route the request through an inherited proxy host');
+        test.done();
       });
     });
   },
