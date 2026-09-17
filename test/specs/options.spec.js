@@ -81,4 +81,32 @@ describe('options', function () {
       done();
     });
   });
+
+  it('should combine the URLs if base url and request url exist and allowAbsoluteUrls is false', function (done) {
+    var instance = axios.create({
+      baseURL: 'http://someurl.com/',
+      allowAbsoluteUrls: false
+    });
+
+    instance.get('http://someotherurl.com/');
+
+    getAjaxRequest().then(function (request) {
+      expect(request.url).toBe('http://someurl.com/http://someotherurl.com/');
+      done();
+    });
+
+  });
+
+  it('should combine the URLs if allowAbsoluteUrls is false on the request config', function (done) {
+    var instance = axios.create({
+      baseURL: 'http://someurl.com/'
+    });
+
+    instance.get('http://someotherurl.com/', { allowAbsoluteUrls: false });
+
+    getAjaxRequest().then(function (request) {
+      expect(request.url).toBe('http://someurl.com/http://someotherurl.com/');
+      done();
+    });
+  });
 });

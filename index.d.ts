@@ -20,6 +20,7 @@ export interface AxiosRequestConfig {
   url?: string;
   method?: string;
   baseURL?: string;
+  allowAbsoluteUrls?: boolean;
   transformRequest?: AxiosTransformer | AxiosTransformer[];
   transformResponse?: AxiosTransformer | AxiosTransformer[];
   headers?: any;
